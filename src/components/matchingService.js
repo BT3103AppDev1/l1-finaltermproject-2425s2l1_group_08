@@ -1,349 +1,354 @@
-import { collection, getDocs, query, where, addDoc, doc, getDoc, updateDoc } from 'firebase/firestore'
-import { app } from '../firebase.js'
-import { getFirestore } from 'firebase/firestore'
-import 'primeicons/primeicons.css'
-import { useUserStore } from '@/stores/user-store'
+/**
+ * Matching Service for Lost and Found Items
+ * 
+ * This service provides functionality to match lost items with found items and vice versa
+ * using various criteria including category, color, description, brand, and time proximity.
+ */
 
-// Get Firestore instance
-const db = getFirestore(app)
-console.log('Firestore initialized:', db)
+import { collection, getDocs, query, where, addDoc, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { app } from '../firebase.js';
+import { getFirestore } from 'firebase/firestore';
+import 'primeicons/primeicons.css';
+import { useUserStore } from '@/stores/user-store';
 
+// Initialize Firestore database instance
+const db = getFirestore(app);
+
+/**
+ * Finds matching found items for a reported lost item
+ * 
+ * @param {Object} formData - Lost item form data containing category, color, brand, datetime, etc.
+ * @returns {Array} Array of matching found items
+ * @throws {Error} If unable to retrieve matching items
+ */
 export async function findMatchingItems(formData) {
-    console.log('Form Data:', formData) // Log formData to see if datetime is there
-
     try {
-        const dateTimeLostString = formData.datetime // Use 'datetime' here
+        // Validate datetime input
+        const dateTimeLostString = formData.datetime;
         if (!dateTimeLostString || typeof dateTimeLostString !== 'string') {
-            throw new Error("'datetime' is missing or not a valid string.")
+            throw new Error("'datetime' is missing or not a valid string.");
         }
 
-        console.log('datetime:', dateTimeLostString)
-
-        const dateTimeLost = new Date(dateTimeLostString)
-
+        const dateTimeLost = new Date(dateTimeLostString);
         if (isNaN(dateTimeLost.getTime())) {
-            throw new Error("'datetime' is not a valid date string.")
+            throw new Error("'datetime' is not a valid date string.");
         }
 
-        console.log('Parsed datetime:', dateTimeLost)
+        // Calculate date range for matching (7 days after lost date)
+        const sevenDaysAfterLost = new Date(dateTimeLost);
+        sevenDaysAfterLost.setDate(dateTimeLost.getDate() + 7);
 
-        const sevenDaysAfterLost = new Date(dateTimeLost)
-        sevenDaysAfterLost.setDate(dateTimeLost.getDate() + 7)
+        const foundItemRef = collection(db, 'Found Item');
+        let results = [];
 
-        const foundItemRef = collection(db, 'Found Item')
-
-        // First query: Match by category and colour
-        const q = query(
+        // STRATEGY 1: Try to match by both category and color
+        const categoryColorQuery = query(
             foundItemRef,
-            where('category', '==', formData.category), // Query by category only
-            where('colour', '==', formData.color), // Query by colour too
-        )
+            where('category', '==', formData.category),
+            where('colour', '==', formData.color)
+        );
 
-        console.log('Firestore query (category & colour):', q)
+        const querySnapshot = await getDocs(categoryColorQuery);
 
-        const querySnapshot = await getDocs(q)
-
-        let results = []
-
-        // If no items found by both category and colour, proceed with category only
+        // STRATEGY 2: If no matches with category AND color, try with category only
         if (querySnapshot.empty) {
-            console.log('No items found matching category and colour. Trying category only...')
-            // Perform the query for category only
-            const categoryQuery = query(foundItemRef, where('category', '==', formData.category))
+            const categoryQuery = query(foundItemRef, where('category', '==', formData.category));
+            const categorySnapshot = await getDocs(categoryQuery);
 
-            const categorySnapshot = await getDocs(categoryQuery)
-
-            // If still no items found, just return
             if (categorySnapshot.empty) {
-                console.log('No items found matching category alone.')
-                return []
+                return []; // No matches found at all
             }
 
-            // Check descriptions for items found by category alone
+            // Process category-only matches with additional filtering
             categorySnapshot.forEach((doc) => {
-                const docData = doc.data()
+                const docData = doc.data();
 
-                // Handle description comparison
-                let descriptionMatch = true // Default to true if no description/brand comparison is needed
+                // Check for description or brand matches
+                const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || [];
+                const lostSet = new Set(lostDescriptionWords);
 
-                const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || []
-                const lostSet = new Set(lostDescriptionWords)
+                const lostBrandWords = formData.brand?.toLowerCase().match(/\b\w+\b/g) || [];
+                const lostBrandSet = new Set(lostBrandWords);
 
-                const lostBrandWords = formData.brand?.toLowerCase().match(/\b\w+\b/g) || []
-                const lostBrandSet = new Set(lostBrandWords)
+                let descMatched = false;
+                let brandMatched = false;
 
-                let descMatched = false
-                let brandMatched = false
-
+                // Check description match
                 if (docData.description) {
-                    const foundDescriptionWords = docData.description.toLowerCase().match(/\b\w+\b/g) || []
-                    const foundDescSet = new Set(foundDescriptionWords)
-                    descMatched = [...lostSet].some((word) => foundDescSet.has(word))
+                    const foundDescriptionWords = docData.description.toLowerCase().match(/\b\w+\b/g) || [];
+                    const foundDescSet = new Set(foundDescriptionWords);
+                    descMatched = [...lostSet].some((word) => foundDescSet.has(word));
                 }
 
+                // Check brand match
                 if (docData.brand) {
-                    const foundBrandWords = docData.brand.toLowerCase().match(/\b\w+\b/g) || []
-                    const foundBrandSet = new Set(foundBrandWords)
-                    brandMatched = [...lostBrandSet].some((word) => foundBrandSet.has(word))
+                    const foundBrandWords = docData.brand.toLowerCase().match(/\b\w+\b/g) || [];
+                    const foundBrandSet = new Set(foundBrandWords);
+                    brandMatched = [...lostBrandSet].some((word) => foundBrandSet.has(word));
                 }
 
-                descriptionMatch = descMatched || brandMatched
+                const descriptionMatch = descMatched || brandMatched;
 
-                // Check if the date is within 7 days
-                let dateTimeFound = docData.date_time_found
+                // Convert and normalize date format
+                let dateTimeFound = docData.date_time_found;
                 if (dateTimeFound && dateTimeFound.toDate) {
-                    dateTimeFound = dateTimeFound.toDate()
+                    dateTimeFound = dateTimeFound.toDate();
                 } else {
-                    dateTimeFound = new Date(dateTimeFound)
+                    dateTimeFound = new Date(dateTimeFound);
                 }
 
-                const timeDiff = Math.abs(dateTimeFound - dateTimeLost)
-                const diffInDays = timeDiff / (1000 * 60 * 60 * 24)
+                // Check if dates are within 7-day window
+                const timeDiff = Math.abs(dateTimeFound - dateTimeLost);
+                const diffInDays = timeDiff / (1000 * 60 * 60 * 24);
 
+                // Add to results if within date range and description matches
                 if (diffInDays <= 7 && descriptionMatch) {
-                    console.log('Found matching document (category only):', doc.id, docData)
-                    results.push({ id: doc.id, ...docData })
+                    results.push({ id: doc.id, ...docData });
                 }
-            })
+            });
         } else {
-            // Handle the case where category and colour match
+            // Process category and color matches
             querySnapshot.forEach((doc) => {
-                const docData = doc.data()
+                const docData = doc.data();
 
-                let dateTimeFound = docData.date_time_found
+                // Convert and normalize date format
+                let dateTimeFound = docData.date_time_found;
                 if (dateTimeFound && dateTimeFound.toDate) {
-                    dateTimeFound = dateTimeFound.toDate()
+                    dateTimeFound = dateTimeFound.toDate();
                 } else {
-                    dateTimeFound = new Date(dateTimeFound)
+                    dateTimeFound = new Date(dateTimeFound);
                 }
 
-                let descriptionMatch = true // Default to true if no description comparison is needed
-
+                // Special handling for "others" category and student cards
+                let descriptionMatch = true; // Default to true
                 if ((formData.category === 'others' || formData.category === 'Student Card') && docData.description) {
-                    const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || []
-                    const foundDescriptionWords = docData.description?.toLowerCase().match(/\b\w+\b/g) || []
+                    const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || [];
+                    const foundDescriptionWords = docData.description?.toLowerCase().match(/\b\w+\b/g) || [];
 
-                    console.log('Lost description words:', lostDescriptionWords)
-                    console.log('Found description words:', foundDescriptionWords)
+                    const lostSet = new Set(lostDescriptionWords);
+                    const foundSet = new Set(foundDescriptionWords);
 
-                    const lostSet = new Set(lostDescriptionWords)
-                    const foundSet = new Set(foundDescriptionWords)
-
-                    descriptionMatch = [...lostSet].some((word) => foundSet.has(word))
-
-                    console.log('Description match (using Set):', descriptionMatch)
+                    // Check if any word in lost description is in found description
+                    descriptionMatch = [...lostSet].some((word) => foundSet.has(word));
                 }
 
-                // Apply 7 days rule (regardless of which date is earlier)
-                const timeDiff = Math.abs(dateTimeFound - dateTimeLost)
-                const diffInDays = timeDiff / (1000 * 60 * 60 * 24)
+                // Check if dates are within 7-day window
+                const timeDiff = Math.abs(dateTimeFound - dateTimeLost);
+                const diffInDays = timeDiff / (1000 * 60 * 60 * 24);
 
-                if (docData.colour === formData.color && docData.claimed_status === 'Not Found Yet' && diffInDays <= 7 && descriptionMatch) {
-                    console.log('Found matching document:', doc.id, docData)
-                    results.push({ id: doc.id, ...docData })
+                // Add to results if color matches, item is unclaimed, within date range, and description matches
+                if (docData.colour === formData.color && 
+                    docData.claimed_status === 'Not Found Yet' && 
+                    diffInDays <= 7 && 
+                    descriptionMatch) {
+                    results.push({ id: doc.id, ...docData });
                 }
-            })
+            });
         }
 
-        console.log('Matching found items:', results)
-        const userStore = useUserStore()
-        const user_id = userStore.userId
-        const filteredResults = results.filter(item => item.reporter_id != user_id);
-        return filteredResults
-
-        // return results
+        // Filter out items reported by the current user
+        const userStore = useUserStore();
+        const userId = userStore.userId;
+        const filteredResults = results.filter(item => item.reporter_id !== userId);
+        
+        return filteredResults;
     } catch (error) {
-        console.error('Error finding matching items:', error)
-        throw new Error('Unable to retrieve matching items. Please try again later.')
+        console.error('Error finding matching items:', error);
+        throw new Error('Unable to retrieve matching items. Please try again later.');
     }
 }
 
+/**
+ * Finds matching lost items for a reported found item and sends notifications
+ * 
+ * @param {Object} formData - Found item form data containing category, color, brand, datetime, etc.
+ * @returns {Array} Array of matching lost item IDs
+ * @throws {Error} If unable to retrieve matching items
+ */
 export async function findMatchingLostItems(formData) {
-    console.log('Form Data:', formData) // Log formData to see if datetime is there
-
     try {
-        const dateTimeLostString = formData.datetime // Use 'datetime' here
+        // Validate datetime input
+        const dateTimeLostString = formData.datetime;
         if (!dateTimeLostString || typeof dateTimeLostString !== 'string') {
-            throw new Error("'datetime' is missing or not a valid string.")
+            throw new Error("'datetime' is missing or not a valid string.");
         }
 
-        console.log('datetime:', dateTimeLostString)
-
-        const dateTimeLost = new Date(dateTimeLostString)
-
+        const dateTimeLost = new Date(dateTimeLostString);
         if (isNaN(dateTimeLost.getTime())) {
-            throw new Error("'datetime' is not a valid date string.")
+            throw new Error("'datetime' is not a valid date string.");
         }
 
-        console.log('Parsed datetime:', dateTimeLost)
+        // Calculate date range for matching (7 days before found date)
+        const sevenDaysBeforeLost = new Date(dateTimeLost);
+        sevenDaysBeforeLost.setDate(dateTimeLost.getDate() - 7);
 
-        const sevenDaysAfterLost = new Date(dateTimeLost)
-        sevenDaysAfterLost.setDate(dateTimeLost.getDate() - 7)
+        const lostItemRef = collection(db, 'Lost Item');
+        let results = [];
 
-        const foundItemRef = collection(db, 'Lost Item')
+        // STRATEGY 1: Try to match by both category and color
+        const categoryColorQuery = query(
+            lostItemRef,
+            where('category', '==', formData.category),
+            where('colour', '==', formData.color)
+        );
 
-        // First query: Match by category and colour
-        const q = query(
-            foundItemRef,
-            where('category', '==', formData.category), // Query by category only
-            where('colour', '==', formData.color), // Query by colour too
-        )
+        const querySnapshot = await getDocs(categoryColorQuery);
 
-        console.log('Firestore query (category & colour):', q)
-
-        const querySnapshot = await getDocs(q)
-
-        let results = []
-
-        // If no items found by both category and colour, proceed with category only
+        // STRATEGY 2: If no matches with category AND color, try with category only
         if (querySnapshot.empty) {
-            console.log('No items found matching category and colour. Trying category only...')
-            // Perform the query for category only
-            const categoryQuery = query(foundItemRef, where('category', '==', formData.category))
+            const categoryQuery = query(lostItemRef, where('category', '==', formData.category));
+            const categorySnapshot = await getDocs(categoryQuery);
 
-            const categorySnapshot = await getDocs(categoryQuery)
-
-            // If still no items found, just return
             if (categorySnapshot.empty) {
-                console.log('No items found matching category alone.')
-                return []
+                return []; // No matches found at all
             }
 
-            // Check descriptions for items found by category alone
+            // Process category-only matches with additional filtering
             categorySnapshot.forEach((doc) => {
-                const docData = doc.data()
+                const docData = doc.data();
 
-                // Handle description comparison
-                let descriptionMatch = true // Default to true if no description/brand comparison is needed
+                // Check for description or brand matches
+                const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || [];
+                const lostSet = new Set(lostDescriptionWords);
 
-                const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || []
-                const lostSet = new Set(lostDescriptionWords)
+                const lostBrandWords = formData.brand?.toLowerCase().match(/\b\w+\b/g) || [];
+                const lostBrandSet = new Set(lostBrandWords);
 
-                const lostBrandWords = formData.brand?.toLowerCase().match(/\b\w+\b/g) || []
-                const lostBrandSet = new Set(lostBrandWords)
+                let descMatched = false;
+                let brandMatched = false;
 
-                let descMatched = false
-                let brandMatched = false
-
+                // Check description match
                 if (docData.description) {
-                    const foundDescriptionWords = docData.description.toLowerCase().match(/\b\w+\b/g) || []
-                    const foundDescSet = new Set(foundDescriptionWords)
-                    descMatched = [...lostSet].some((word) => foundDescSet.has(word))
+                    const foundDescriptionWords = docData.description.toLowerCase().match(/\b\w+\b/g) || [];
+                    const foundDescSet = new Set(foundDescriptionWords);
+                    descMatched = [...lostSet].some((word) => foundDescSet.has(word));
                 }
 
+                // Check brand match
                 if (docData.brand) {
-                    const foundBrandWords = docData.brand.toLowerCase().match(/\b\w+\b/g) || []
-                    const foundBrandSet = new Set(foundBrandWords)
-                    brandMatched = [...lostBrandSet].some((word) => foundBrandSet.has(word))
+                    const foundBrandWords = docData.brand.toLowerCase().match(/\b\w+\b/g) || [];
+                    const foundBrandSet = new Set(foundBrandWords);
+                    brandMatched = [...lostBrandSet].some((word) => foundBrandSet.has(word));
                 }
 
-                descriptionMatch = descMatched || brandMatched
+                const descriptionMatch = descMatched || brandMatched;
 
-                // Check if the date is within 7 days
-                let dateTimeFound = docData.date_time_lost
-                if (dateTimeFound && dateTimeFound.toDate) {
-                    dateTimeFound = dateTimeFound.toDate()
+                // Convert and normalize date format
+                let dateTimeLostInDB = docData.date_time_lost;
+                if (dateTimeLostInDB && dateTimeLostInDB.toDate) {
+                    dateTimeLostInDB = dateTimeLostInDB.toDate();
                 } else {
-                    dateTimeFound = new Date(dateTimeFound)
+                    dateTimeLostInDB = new Date(dateTimeLostInDB);
                 }
 
-                const timeDiff = Math.abs(dateTimeFound - dateTimeLost)
-                const diffInDays = timeDiff / (1000 * 60 * 60 * 24)
+                // Check if dates are within 7-day window
+                const timeDiff = Math.abs(dateTimeLostInDB - dateTimeLost);
+                const diffInDays = timeDiff / (1000 * 60 * 60 * 24);
 
+                // Add to results if within date range and description matches
                 if (diffInDays <= 7 && descriptionMatch) {
-                    console.log('Found matching document (category only):', doc.id, docData)
-                    results.push({ id: doc.id, ...docData })
+                    results.push({ id: doc.id, ...docData });
                 }
-            })
+            });
         } else {
-            // Handle the case where category and colour match
+            // Process category and color matches
             querySnapshot.forEach((doc) => {
-                const docData = doc.data()
+                const docData = doc.data();
 
-                let dateTimeFound = docData.date_time_lost
-                if (dateTimeFound && dateTimeFound.toDate) {
-                    dateTimeFound = dateTimeFound.toDate()
+                // Convert and normalize date format
+                let dateTimeLostInDB = docData.date_time_lost;
+                if (dateTimeLostInDB && dateTimeLostInDB.toDate) {
+                    dateTimeLostInDB = dateTimeLostInDB.toDate();
                 } else {
-                    dateTimeFound = new Date(dateTimeFound)
+                    dateTimeLostInDB = new Date(dateTimeLostInDB);
                 }
 
-                let descriptionMatch = true // Default to true if no description comparison is needed
-
+                // Special handling for "others" category and student cards
+                let descriptionMatch = true; // Default to true
                 if ((formData.category === 'others' || formData.category === 'Student Card') && docData.description) {
-                    const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || []
-                    const foundDescriptionWords = docData.description?.toLowerCase().match(/\b\w+\b/g) || []
+                    const lostDescriptionWords = formData.description?.toLowerCase().match(/\b\w+\b/g) || [];
+                    const foundDescriptionWords = docData.description?.toLowerCase().match(/\b\w+\b/g) || [];
 
-                    console.log('Lost description words:', lostDescriptionWords)
-                    console.log('Found description words:', foundDescriptionWords)
+                    const lostSet = new Set(lostDescriptionWords);
+                    const foundSet = new Set(foundDescriptionWords);
 
-                    const lostSet = new Set(lostDescriptionWords)
-                    const foundSet = new Set(foundDescriptionWords)
-
-                    descriptionMatch = [...lostSet].some((word) => foundSet.has(word))
-
-                    console.log('Description match (using Set):', descriptionMatch)
+                    // Check if any word in found description is in lost description
+                    descriptionMatch = [...lostSet].some((word) => foundSet.has(word));
                 }
 
-                // Apply 7 days rule (regardless of which date is earlier)
-                const timeDiff = Math.abs(dateTimeFound - dateTimeLost)
-                const diffInDays = timeDiff / (1000 * 60 * 60 * 24)
+                // Check if dates are within 7-day window
+                const timeDiff = Math.abs(dateTimeLostInDB - dateTimeLost);
+                const diffInDays = timeDiff / (1000 * 60 * 60 * 24);
 
-                if (docData.colour === formData.color && docData.claimed_status === 'Not Found Yet' && diffInDays <= 7 && descriptionMatch) {
-                    console.log('Found matching document:', doc.id, docData)
-                    results.push({ id: doc.id, ...docData })
+                // Add to results if color matches, item is unclaimed, within date range, and description matches
+                if (docData.colour === formData.color && 
+                    docData.claimed_status === 'Not Found Yet' && 
+                    diffInDays <= 7 && 
+                    descriptionMatch) {
+                    results.push({ id: doc.id, ...docData });
                 }
-            })
+            });
         }
 
-        console.log('Matching found items:', results)
-        const userStore = useUserStore()
-        const user_id = userStore.userId
-        const filtered = results.filter(item => item.reporter_id != user_id);
-        const arrayResult = filtered.map(item => item.lost_item_id)
+        // Filter out items reported by the current user
+        const userStore = useUserStore();
+        const userId = userStore.userId;
+        const filteredResults = results.filter(item => item.reporter_id !== userId);
+        
+        // Extract just the lost item IDs for processing
+        const matchingIds = filteredResults.map(item => item.lost_item_id);
 
-        // const arrayResult = results.map((item) => item.lost_item_id)
-
-        console.log(arrayResult)
-        for (let i = 0; i < arrayResult.length; i++) {
-            if (arrayResult[i] == 'empty for now') {
-                continue
+        // Process each matching item
+        for (const itemId of matchingIds) {
+            // Skip placeholder items
+            if (itemId === 'empty for now') {
+                continue;
             }
-            const lostItemRef = doc(db, 'Lost Item', arrayResult[i])
-            const lostItemSnap = await getDoc(lostItemRef)
+            
+            // Get the lost item document
+            const lostItemRef = doc(db, 'Lost Item', itemId);
+            const lostItemSnap = await getDoc(lostItemRef);
+            
             if (lostItemSnap.exists()) {
-                const lostItemData = lostItemSnap.data()
-                const email = lostItemData.email
-                sendEmail(email, lostItemData)
+                const lostItemData = lostItemSnap.data();
+                // Send notification email to the item owner
+                await sendEmail(lostItemData.email, lostItemData);
             }
-            console.log(arrayResult[i])
+            
+            // Mark the lost item as having a potential match
             await updateDoc(lostItemRef, {
                 found_afterwards: true,
-            })
+            });
         }
 
-        return arrayResult
+        return matchingIds;
     } catch (error) {
-        console.error('Error finding matching items:', error)
-        throw new Error('Unable to retrieve matching items. Please try again later.')
+        console.error('Error finding matching lost items:', error);
+        throw new Error('Unable to retrieve matching items. Please try again later.');
     }
 }
 
+/**
+ * Sends a notification email to a user when a potential match is found
+ * 
+ * @param {string} userEmail - Email address of the recipient
+ * @param {Object} data - Data about the lost item for email content
+ */
 async function sendEmail(userEmail, data) {
     try {
-        // Add a mail document to the "mail" collection so that your email service can process it
-        const emailDate = data.date_time_lost.replace('T', ' ')
-        console.log('ahh')
-        console.log(data.lost_item_id)
-
+        // Format the date for email display
+        const emailDate = data.date_time_lost.replace('T', ' ');
+        
+        // Create an email document in the 'mail' collection for the email service to process
         await addDoc(collection(db, 'mail'), {
             to: userEmail,
             message: {
                 subject: 'Your lost item has found a potential match!',
                 html: `Congratulations, we have found you a potential match for your lost ${data.name} that was lost in ${data.location} on ${emailDate}!`,
             },
-        })
-        console.log(`Email queued for user: ${userEmail}`)
+        });
     } catch (error) {
-        console.error('Error queuing email:', error)
+        console.error('Error queuing email:', error);
+        // Email failure shouldn't break the entire flow, so we just log the error
     }
 }
